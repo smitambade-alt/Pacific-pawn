@@ -1,92 +1,117 @@
+/**
+ * Chess.com public API helpers.
+ * Docs: https://www.chess.com/news/view/published-data-api
+ * The pub API supports CORS (access-control-allow-origin: *) so it is safe to
+ * call directly from the browser. No API key or token is required.
+ */
 
 const API = 'https://api.chess.com/pub';
 
-export type ClubMemberEntry = {
+export interface ClubInfo {
+  name: string;
+  club_id: number;
+  members_count: number;
+  created: number;
+  url: string;
+  icon?: string;
+  description?: string;
+}
+
+export interface ClubMemberEntry {
   username: string;
-  joined: number;
-  avatar?: string;
-  profileUrl?: string;
-};
-
-type Player = {
-  username?: string;
-  avatar?: string;
-  url?: string;
-  title?: string;
-  name?: string;
-  country?: string;
-  followers?: number;
-};
-
-type Club = {
-  name?: string;
-  members_count?: number;
-};
-
-export async function fetchPlayer(username: string): Promise<Player | null> {
-  try {
-    const response = await fetch(
-      `${API}/player/${encodeURIComponent(username.toLowerCase())}`
-    );
-    if (!response.ok) return null;
-    return (await response.json()) as Player;
-  } catch {
-    return null;
-  }
+  joined: number; // unix seconds
 }
 
-export async function fetchClub(slug: string): Promise<Club | null> {
-  try {
-    const response = await fetch(
-      `${API}/club/${encodeURIComponent(slug.toLowerCase())}`
-    );
-    if (!response.ok) return null;
-    return (await response.json()) as Club;
-  } catch {
-    return null;
-  }
+export interface PlayerProfile {
+  username: string;
+  avatar?: string;
+  url: string;
+  name?: string;
+  joined?: number;
+  status?: string;
 }
 
-export async function fetchNewestMembers(
-  slug: string,
-  limit = 3
-): Promise<ClubMemberEntry[]> {
+export async function fetchClub(slug: string): Promise<ClubInfo | null> {
   try {
-    const response = await fetch(
-      `${API}/club/${encodeURIComponent(slug.toLowerCase())}/members`
-    );
-    if (!response.ok) return [];
-
-    const data = (await response.json()) as {
-      weekly?: { username: string; joined: number }[];
-      monthly?: { username: string; joined: number }[];
-      all_time?: { username: string; joined: number }[];
+    const res = await fetch(`${API}/club/${slug}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      name: data.name,
+      club_id: data.club_id,
+      members_count: data.members_count,
+      created: data.created,
+      url: data.url,
+      icon: data.icon,
+      description: data.description,
     };
+  } catch {
+    return null;
+  }
+}
 
-    const members = [
-      ...(data.weekly ?? []),
-      ...(data.monthly ?? []),
-      ...(data.all_time ?? []),
+/**
+ * Returns all club members sorted newest-first by join timestamp.
+ * The API groups members into weekly/monthly/all_time; we merge and sort.
+ */
+export async function fetchClubMembers(slug: string): Promise<ClubMemberEntry[]> {
+  try {
+    const res = await fetch(`${API}/club/${slug}/members`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const all: ClubMemberEntry[] = [
+      ...(data.weekly || []),
+      ...(data.monthly || []),
+      ...(data.all_time || []),
     ];
-
-    const unique = new Map<string, ClubMemberEntry>();
-    for (const member of members) {
-      if (!member.username) continue;
-      const key = member.username.toLowerCase();
-      const previous = unique.get(key);
-      if (!previous || member.joined > previous.joined) {
-        unique.set(key, {
-          username: member.username,
-          joined: member.joined,
-          profileUrl: `https://www.chess.com/member/${encodeURIComponent(member.username)}`,
-        });
-      }
-    }
-
-    return [...unique.values()]
-      .sort((a, b) => b.joined - a.joined)
-      .slice(0, limit);
+    const seen = new Set<string>();
+    const unique = all.filter((m) => {
+      if (seen.has(m.username)) return false;
+      seen.add(m.username);
+      return true;
+    });
+    return unique.sort((a, b) => (b.joined || 0) - (a.joined || 0));
   } catch {
     return [];
   }
+}
+
+export async function fetchPlayer(username: string): Promise<PlayerProfile | null> {
+  try {
+    const res = await fetch(`${API}/player/${username.toLowerCase()}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      username: data.username,
+      avatar: data.avatar,
+      url: data.url,
+      name: data.name,
+      joined: data.joined,
+      status: data.status,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Newest-first members with their profile (avatar/url). Limited to `count`. */
+export async function fetchNewestMembers(
+  slug: string,
+  count: number,
+): Promise<(ClubMemberEntry & { avatar?: string; profileUrl?: string })[]> {
+  const members = await fetchClubMembers(slug);
+  const top = members.slice(0, count);
+  const withProfiles = await Promise.all(
+    top.map(async (m) => {
+      const p = await fetchPlayer(m.username);
+      return {
+        ...m,
+        avatar: p?.avatar,
+        profileUrl: p?.url ?? `https://www.chess.com/member/${m.username}`,
+      };
+    }),
+  );
+  return withProfiles;
 }
